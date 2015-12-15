@@ -5,6 +5,7 @@ book/
 temp/
 models/
 build/
+misc/*.txt
 .pynative
 *.pyc
 *~
@@ -13,3 +14,5 @@ build/
 *.os
 *.a
 *.so
+*.clstm
+.sconsign.dblite

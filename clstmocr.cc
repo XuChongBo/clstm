@@ -6,15 +6,19 @@
 #include <vector>
 #include <memory>
 #include <math.h>
+#include <Eigen/Dense>
 #include <sstream>
 #include <fstream>
 #include <iostream>
 #include <set>
+
+#include "multidim.h"
+#include "pymulti.h"
 #include "extras.h"
-#include "utils.h"
 
 using namespace Eigen;
 using namespace ocropus;
+using namespace pymulti;
 using std::vector;
 using std::map;
 using std::make_pair;
@@ -39,6 +43,17 @@ inline float scaled_log(float x) {
   return (l + thresh) / thresh;
 }
 
+void write_text(const string fname, const wstring &data) {
+  string utf8 = utf32_to_utf8(data);
+  ofstream stream(fname);
+  stream << utf8 << endl;
+}
+
+void write_text(const string fname, const string &data) {
+  ofstream stream(fname);
+  stream << data << endl;
+}
+
 int main1(int argc, char **argv) {
   if (argc != 2) THROW("give text file as an argument");
   const char *fname = argv[1];
@@ -55,16 +70,17 @@ int main1(int argc, char **argv) {
   ifstream stream(fname);
   string line;
   while (getline(stream, line)) {
-    Tensor<float,2> raw;
+    mdarray<float> raw;
     string fname = line;
     string basename = fname.substr(0, fname.find_last_of("."));
-    read_png(raw, fname.c_str());
-    raw = -raw + Float(1.0);
+    read_png(raw, fname.c_str(), true);
+    for (int i = 0; i < raw.size(); i++) raw[i] = 1 - raw[i];
     if (!conf) {
       string out = clstm.predict_utf8(raw);
+      //wstring out = clstm.predict(raw);
       cout << line << "\t" << out << endl;
       if (save_text) {
-        write_text(basename + ".txt", out);
+        write_text(basename+".txt", out);
       }
     } else {
       cout << "file " << line << endl;
@@ -76,19 +92,19 @@ int main1(int argc, char **argv) {
         cout << p.i << sep << p.x << sep << p.c << sep << p.p << endl;
       }
     }
-    if (output == "text") {
+    if (output == "text" ) {
       // nothing else to do
     } else if (output == "logs") {
-      Tensor<float,2> outputs;
+      mdarray<float> outputs;
       clstm.get_outputs(outputs);
-      for (int t = 0; t < outputs.dimension(0); t++)
-        for (int c = 0; c < outputs.dimension(1); c++)
-          outputs(t, c) = scaled_log(outputs(t, c));
-      write_png((basename + ".lp.png").c_str(), outputs);
+      for (int t=0; t<outputs.dim(0); t++)
+        for (int c=0; c<outputs.dim(1); c++)
+          outputs(t,c) = scaled_log(outputs(t,c));
+      write_png((basename+".lp.png").c_str(), outputs);
     } else if (output == "posteriors") {
-      Tensor<float,2> outputs;
+      mdarray<float> outputs;
       clstm.get_outputs(outputs);
-      write_png((basename + ".p.png").c_str(), outputs);
+      write_png((basename+".p.png").c_str(), outputs);
     } else {
       THROW("unknown output format");
     }
@@ -97,6 +113,13 @@ int main1(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
-  TRY { return main1(argc, argv); }
-  CATCH(const char *message) { cerr << "FATAL: " << message << endl; }
+#ifdef NOEXCEPTION
+  return main1(argc, argv);
+#else
+  try {
+    return main1(argc, argv);
+  } catch (const char *message) {
+    cerr << "FATAL: " << message << endl;
+  }
+#endif
 }

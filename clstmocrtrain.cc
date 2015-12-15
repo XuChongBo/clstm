@@ -6,16 +6,20 @@
 #include <vector>
 #include <memory>
 #include <math.h>
+#include <Eigen/Dense>
 #include <sstream>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <regex>
+
+#include "multidim.h"
+#include "pymulti.h"
 #include "extras.h"
-#include "utils.h"
 
 using namespace Eigen;
 using namespace ocropus;
+using namespace pymulti;
 using std::vector;
 using std::map;
 using std::make_pair;
@@ -32,170 +36,213 @@ using std::regex_replace;
 #define string std_string
 #define wstring std_wstring
 
-#ifndef NODISPLAY
-void show(PyServer &py, Sequence &s, int subplot = 0, int batch=0) {
-  Tensor<float,2> temp;
-  temp.resize(s.size(), s.rows());
-  for(int i=0; i<s.size(); i++)
-    for(int j=0; j<s.rows(); j++)
-      temp(i,j) = s[i].v(j,batch);
+string basename(string s) {
+  int start = 0;
+  for (;;) {
+    auto pos = s.find("/", start);
+    if (pos == string::npos) break;
+    start = pos + 1;
+  }
+  auto pos = s.find(".", start);
+  if (pos == string::npos)
+    return s;
+  else
+    return s.substr(0, pos);
+}
+
+string read_text(string fname, int maxsize = 65536) {
+  char buf[maxsize];
+  buf[maxsize - 1] = 0;
+  ifstream stream(fname);
+  stream.read(buf, maxsize - 1);
+  int n = stream.gcount();
+  while (n > 0 && buf[n - 1] == '\n') n--;
+  return string(buf, n);
+}
+
+wstring read_text32(string fname, int maxsize = 65536) {
+  char buf[maxsize];
+  buf[maxsize - 1] = 0;
+  ifstream stream(fname);
+  stream.read(buf, maxsize - 1);
+  int n = stream.gcount();
+  while (n > 0 && buf[n - 1] == '\n') n--;
+  return utf8_to_utf32(string(buf, n));
+}
+
+void get_codec(vector<int> &codec,
+               const vector<string> &fnames,
+               const wstring extra = L"") {
+  set<int> codes;
+  codes.insert(0);
+  for (auto c : extra) codes.insert(int(c));
+  for (int i = 0; i < fnames.size(); i++) {
+    string fname = fnames[i];
+    string base = basename(fname);
+    wstring text32 = read_text32(base + ".gt.txt");
+    for (auto c : text32) codes.insert(int(c));
+  }
+  codec.clear();
+  for (auto c : codes) codec.push_back(c);
+  for (int i = 1; i < codec.size(); i++) assert(codec[i] > codec[i - 1]);
+}
+
+void show(PyServer &py, Sequence &s, int subplot = 0) {
+  mdarray<float> temp;
+  assign(temp, s);
   if (subplot > 0) py.evalf("subplot(%d)", subplot);
   py.imshowT(temp, "cmap=cm.hot");
 }
-#endif
+
+void read_lines(vector<string> &lines, string fname) {
+  ifstream stream(fname);
+  string line;
+  lines.clear();
+  while (getline(stream, line)) {
+    lines.push_back(line);
+  }
+}
 
 wstring separate_chars(const wstring &s, const wstring &charsep) {
   if (charsep == L"") return s;
   wstring result;
-  for (int i = 0; i < s.size(); i++) {
+  for (int i=0; i<s.size(); i++) {
     if (i > 0) result.push_back(charsep[0]);
     result.push_back(s[i]);
   }
   return result;
 }
 
-struct Dataset {
-  vector<string> fnames;
-  wstring charsep = utf8_to_utf32(getsenv("charsep", ""));
-  int size() { return fnames.size(); }
-  Dataset() {}
-  Dataset(string file_list) {
-    readFileList(file_list);
-  }
-  void readFileList(string file_list) {
-    read_lines(fnames, file_list);
-  }
-  void getCodec(Codec &codec) {
-    vector<string> gtnames;
-    for (auto s : fnames) gtnames.push_back(basename(s) + ".gt.txt");
-    codec.build(gtnames, charsep);
-  }
-  void readSample(Tensor<float,2> &raw,wstring &gt,int index) {
-    string fname = fnames[index];
-    string base = basename(fname);
-    gt = separate_chars(read_text32(base + ".gt.txt"), charsep);
-    read_png(raw, fname.c_str());
-    raw = -raw + Float(1);
-  }
-};
-
-pair<double, double> test_set_error(CLSTMOCR &clstm, Dataset &testset) {
-  double count = 0.0;
-  double errors = 0.0;
-  for (int test = 0; test < testset.size(); test++) {
-    Tensor<float, 2> raw;
-    wstring gt;
-    testset.readSample(raw, gt, test);
-    wstring pred = clstm.predict(raw);
-    count += gt.size();
-    errors += levenshtein(pred, gt);
-  }
-  return make_pair(count, errors);
-}
-
 int main1(int argc, char **argv) {
-  int ntrain = getienv("ntrain", 10000000);
+  srandomize();
+
+  int nepoch = getienv("nepoch", 10000000);
+  int save_every = getienv("save_every", 10000);
   string save_name = getsenv("save_name", "_ocr");
+  int report_every = getienv("report_every", 100);
+  int display_every = getienv("display_every", 0);
   int report_time = getienv("report_time", 0);
+  int test_every = getienv("test_every", 10000);
+  int epoch_start = getienv("epoch_start", 0);
+  wstring charsep = utf8_to_utf32(getsenv("charsep", ""));
+  print("*** charsep", charsep);
 
   if (argc < 2 || argc > 3) THROW("... training [testing]");
-  Dataset trainingset(argv[1]);
-  assert(trainingset.size()>0);
-  Dataset testset;
-  if (argc>2) testset.readFileList(argv[2]);
-  print("got", trainingset.size(), "files,", testset.size(), "tests");
+  vector<string> fnames, test_fnames;
+  read_lines(fnames, argv[1]);
+  if (argc > 2) read_lines(test_fnames, argv[2]);
+  print("got", fnames.size(), "files,", test_fnames.size(), "tests");
 
-  string load_name = getsenv("load", "");
+  vector<int> codec;
+  get_codec(codec, fnames, charsep);
+  print("got", codec.size(), "classes");
 
   CLSTMOCR clstm;
-
+  string load_name = getsenv("load", "");
   if (load_name != "") {
     clstm.load(load_name);
-  } else {
-    Codec codec;
-    trainingset.getCodec(codec);
-    print("got", codec.size(), "classes");
-
+    print("using exist model file:",  load_name);
+  }else{
     clstm.target_height = int(getrenv("target_height", 48));
-    clstm.createBidi(codec.codec, getienv("nhidden", 100));
-    clstm.setLearningRate(getdenv("lrate", 1e-4), getdenv("momentum", 0.9));
+    clstm.createBidi(codec, getienv("nhidden", 50));
+    clstm.setLearningRate(getdenv("rate", 1e-4), getdenv("momentum", 0.9));
   }
-  network_info(clstm.net);
+
+  clstm.net->info("");
 
   double test_error = 9999.0;
   double best_error = 1e38;
 
-#ifndef NODISPLAY
   PyServer py;
   if (display_every > 0) py.open();
-#endif
-  double start_time = now();
-  int start = clstm.net->attr.get("trial", getienv("start", -1)) + 1;
-  if (start > 0) print("start", start);
 
-  Trigger test_trigger(getienv("test_every", 10000), -1, start);
-  test_trigger.skip0();
-  Trigger save_trigger(getienv("save_every", 10000), ntrain, start);
-  save_trigger.enable(save_name!="").skip0();
-  Trigger report_trigger(getienv("report_every", 100), ntrain, start);
-  Trigger display_trigger(getienv("display_every", 0), ntrain, start);
+  for (int epoch = epoch_start; epoch <= nepoch; epoch++) {
+    //print(epoch);
+    ////////////// random select one sample  and train ////////////////////
+    //int sample_id = irandom() % fnames.size();
+    for (int sample_id = 0; sample_id < fnames.size(); ++sample_id){
+      double start = now();
+      string fname = fnames[sample_id];
+      string base = basename(fname);
+      wstring gt = separate_chars(read_text32(base + ".gt.txt"), charsep);
+      mdarray<float> raw;
+      read_png(raw, fname.c_str(), true);
+      for (int i = 0; i < raw.size(); i++) raw[i] = 1 - raw[i];
+      wstring pred = clstm.train(raw, gt);   // do train and get the pred output
 
-  for (int trial = start; trial < ntrain; trial++) {
+      //////////// show the sample  /////////////
+      if (display_every>0 && sample_id % display_every == 0) {
+        py.evalf("clf");
+        show(py, clstm.net->inputs, 411);
+        show(py, clstm.net->outputs, 412);
+        show(py, clstm.targets, 413);
+        show(py, clstm.aligned, 414);
+      }
 
-    int sample = lrand48() % trainingset.size();
-    Tensor<float,2> raw;
-    wstring gt;
-    trainingset.readSample(raw, gt, sample);
-    wstring pred = clstm.train(raw, gt);
+      ////////// report the sample
+      if (report_every>0 && sample_id % report_every == 0) {
+        mdarray<float> temp;
+        print(epoch,"-",sample_id);
+        print("TRU", gt);
+        print("ALN", clstm.aligned_utf8());
+        print("OUT", utf32_to_utf8(pred));
+        if (epoch > 0 && report_time)
+          print("steptime", (now()-start) / report_every);
+        //start = now();
+      }
 
-    if (report_trigger(trial)) {
-      print(trial);
-      print("TRU", gt);
-      print("ALN", clstm.aligned_utf8());
-      print("OUT", utf32_to_utf8(pred));
-      if (trial > 0 && report_time)
-        print("steptime", (now() - start_time) / report_trigger.since());
-      start_time = now();
     }
 
-#ifndef NODISPLAY
-    if (display_trigger(trial)) {
-      py.evalf("clf");
-      show(py, clstm.net->inputs, 411);
-      show(py, clstm.net->outputs, 412);
-      show(py, clstm.targets, 413);
-      show(py, clstm.aligned, 414);
-    }
-#endif
 
-    if (test_trigger(trial)) {
-      auto tse = test_set_error(clstm, testset);
-      double errors = tse.first;
-      double count = tse.second;
+    ////////////////  do validation //////////////
+    if (test_fnames.size() > 0 && test_every > 0 && epoch % test_every == 0) {
+      print("do test");
+      double errors = 0.0;
+      double count = 0.0;
+      for (int test = 0; test < test_fnames.size(); test++) {
+        string fname = test_fnames[test];
+        string base = basename(fname);
+        wstring gt = separate_chars(read_text32(base + ".gt.txt"), charsep);
+        mdarray<float> raw;
+        read_png(raw, fname.c_str(), true);
+        for (int i = 0; i < raw.size(); i++) raw[i] = 1 - raw[i];
+        wstring pred = clstm.predict(raw);
+        count += gt.size();
+        errors += levenshtein(pred, gt);
+      }
       test_error = errors / count;
-      print("ERROR", trial, test_error, "   ", errors, count);
-      if (test_error<best_error) {
+      print("TEST ERROR:", errors,"/", count,"=", test_error);
+      if ( test_error < best_error) {  //save_every == 0 &&
         best_error = test_error;
-        string fname = save_name + ".clstm";
-        print("saving best performing network so far", fname, "error rate: ",
-              best_error);
-        clstm.net->attr.set("trial", trial);
+        //string fname = save_name + ".clstm";
+        string fname = save_name + "current-best-" + to_string(epoch) + ".clstm";
+        print("got best error rate:", best_error);
+        print("saving best performing network by name:", fname);
         clstm.save(fname);
       }
+
     }
 
-    if (save_trigger(trial)) {
-      string fname = save_name + "-" + to_string(trial) + ".clstm";
-      print("saving", fname);
-      clstm.net->attr.set("trial", trial);
+    ///////////// save model peroidly ////////////////
+    if ( save_every > 0 && epoch % save_every == 0) {
+      string fname = save_name + "-" + to_string(epoch) + ".clstm";
       clstm.save(fname);
     }
+
+
   }
 
   return 0;
 }
 
 int main(int argc, char **argv) {
-  TRY { return main1(argc, argv); }
-  CATCH(const char *message) { cerr << "FATAL: " << message << endl; }
+#ifdef NOEXCEPTION
+  return main1(argc, argv);
+#else
+  try {
+    return main1(argc, argv);
+  } catch (const char *message) {
+    cerr << "FATAL: " << message << endl;
+  }
+#endif
 }

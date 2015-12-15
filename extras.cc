@@ -30,135 +30,131 @@ extern "C" {
 #include <vector>
 #include <iostream>
 #include <map>
-#include "pytensor.h"
+#include "multidim.h"
+#include "pymulti.h"
 #include "extras.h"
-#include "utils.h"
 
 namespace ocropus {
+using namespace multidim;
 using namespace std;
 
-template <class T, class S>
-inline void getd0(Tensor<T,2> &image, Tensor<S,1> &slice, int index) {
-  slice.resize(image.dimension(1));
-  for (int i = 0; i < image.dimension(1); i++)
-    slice(i) = (S)image(index, i);
-}
+typedef mdarray<float> floatarray;
+typedef mdarray<unsigned char> bytearray;
 
 template <class T, class S>
-inline void getd1(Tensor<T,2> &image, Tensor<S,1> &slice, int index) {
-  slice.resize(image.dimension(0));
-  for (int i = 0; i < image.dimension(0); i++)
-    slice(i) = (S)image(i, index);
+inline void getd0(mdarray<T> &image, mdarray<S> &slice, int index) {
+  slice.resize(image.dim(1));
+  for (int i = 0; i < image.dim(1); i++)
+    slice.unsafe_at(i) = (S)image.unsafe_at(index, i);
 }
 
 template <class T, class S>
-inline void putd0(Tensor<T,2> &image, Tensor<S,1> &slice, int index) {
-  assert(slice.rank() == 1 && slice.dimension(0) == image.dimension(1));
-  for (int i = 0; i < image.dimension(1); i++)
-    image(index, i) = (T)slice(i);
+inline void getd1(mdarray<T> &image, mdarray<S> &slice, int index) {
+  slice.resize(image.dim(0));
+  for (int i = 0; i < image.dim(0); i++)
+    slice.unsafe_at(i) = (S)image.unsafe_at(i, index);
 }
 
 template <class T, class S>
-inline void putd1(Tensor<T,2> &image, Tensor<S,1> &slice, int index) {
-  assert(slice.rank() == 1 && slice.dimension(0) == image.dimension(0));
-  for (int i = 0; i < image.dimension(0); i++)
-    image(i, index) = (T)slice(i);
+inline void putd0(mdarray<T> &image, mdarray<S> &slice, int index) {
+  assert(slice.rank() == 1 && slice.dim(0) == image.dim(1));
+  for (int i = 0; i < image.dim(1); i++)
+    image.unsafe_at(index, i) = (T)slice.unsafe_at(i);
 }
 
-template <class T,int N>
-inline TensorMap<Tensor<T,N>>TM(Tensor<T,N> &t) {
-    return TensorMap<Tensor<T,N>>(t.data(), t.dimensions());
+template <class T, class S>
+inline void putd1(mdarray<T> &image, mdarray<S> &slice, int index) {
+  assert(slice.rank() == 1 && slice.dim(0) == image.dim(0));
+  for (int i = 0; i < image.dim(0); i++)
+    image.unsafe_at(i, index) = (T)slice.unsafe_at(i);
 }
-
 
 /// Perform 1D Gaussian convolutions using a FIR filter.
 ///
 /// The mask is computed to 3 sigma.
 
 template <class T>
-void gauss1d(Tensor<T,1> &out, Tensor<T,1> &in, float sigma) {
-  out.resize(in.dimension(0));
+void gauss1d(mdarray<T> &out, mdarray<T> &in, float sigma) {
+  out.resize(in.dim(0));
   // make a normalized mask
   int range = 1 + int(3.0 * sigma);
-  Tensor<float,1> mask(2 * range + 1);
+  floatarray mask(2 * range + 1);
   for (int i = 0; i <= range; i++) {
     double y = exp(-i * i / 2.0 / sigma / sigma);
     mask(range + i) = mask(range - i) = y;
   }
   float total = 0.0;
-  for (int i = 0; i < mask.dimension(0); i++) total += mask(i);
-  for (int i = 0; i < mask.dimension(0); i++) mask(i) /= total;
+  for (int i = 0; i < mask.dim(0); i++) total += mask(i);
+  for (int i = 0; i < mask.dim(0); i++) mask(i) /= total;
 
-  T *in_ = in.data();
-  float *mask_ = mask.data();
   // apply it
   int n = in.size();
   for (int i = 0; i < n; i++) {
     double total = 0.0;
-    for (int j = 0; j < mask.dimension(0); j++) {
+    for (int j = 0; j < mask.dim(0); j++) {
       int index = i + j - range;
       if (index < 0) index = 0;
       if (index >= n) index = n - 1;
-      total += in_[index] * mask_[j];  // it's symmetric
+      total += in(index) * mask(j);  // it's symmetric
     }
     out(i) = T(total);
   }
 }
 
-template void gauss1d(Tensor<unsigned char,1> &out, Tensor<unsigned char,1> &in, float sigma);
-template void gauss1d(Tensor<float,1> &out, Tensor<float,1> &in, float sigma);
+template void gauss1d(bytearray &out, bytearray &in, float sigma);
+template void gauss1d(floatarray &out, floatarray &in, float sigma);
 
 /// Perform 1D Gaussian convolutions using a FIR filter.
 ///
 /// The mask is computed to 3 sigma.
 
 template <class T>
-void gauss1d(Tensor<T,1> &v, float sigma) {
-  Tensor<T,1> temp;
+void gauss1d(mdarray<T> &v, float sigma) {
+  mdarray<T> temp;
   gauss1d(temp, v, sigma);
-  v = temp;
+  v.take(temp);
 }
 
-template void gauss1d(Tensor<unsigned char,1> &v, float sigma);
-template void gauss1d(Tensor<float,1> &v, float sigma);
+template void gauss1d(bytearray &v, float sigma);
+template void gauss1d(floatarray &v, float sigma);
 
 /// Perform 2D Gaussian convolutions using a FIR filter.
 ///
 /// The mask is computed to 3 sigma.
 
 template <class T>
-void gauss2d(Tensor<T,2> &a, float sx, float sy) {
-  Tensor<float,1> r, s;
-  for (int i = 0; i < a.dimension(0); i++) {
+void gauss2d(mdarray<T> &a, float sx, float sy) {
+  floatarray r, s;
+  for (int i = 0; i < a.dim(0); i++) {
     getd0(a, r, i);
     gauss1d(s, r, sy);
     putd0(a, s, i);
   }
-  for (int j = 0; j < a.dimension(1); j++) {
+  for (int j = 0; j < a.dim(1); j++) {
     getd1(a, r, j);
     gauss1d(s, r, sx);
     putd1(a, s, j);
   }
 }
 
-template void gauss2d(Tensor<unsigned char,2> &image, float sx, float sy);
-template void gauss2d(Tensor<float,2> &image, float sx, float sy);
+template void gauss2d(bytearray &image, float sx, float sy);
+template void gauss2d(floatarray &image, float sx, float sy);
 
 template <class T>
-inline T &xref(Tensor<T,2> &a, int x, int y) {
+inline T &xref(mdarray<T> &a, int x, int y) {
   if (x < 0)
     x = 0;
-  else if (x >= a.dimension(0))
-    x = a.dimension(0) - 1;
+  else if (x >= a.dim(0))
+    x = a.dim(0) - 1;
   if (y < 0)
     y = 0;
-  else if (y >= a.dimension(1))
-    y = a.dimension(1) - 1;
-  return a(x, y);
+  else if (y >= a.dim(1))
+    y = a.dim(1) - 1;
+  return a.unsafe_at(x, y);
 }
 
 template <class T>
-inline T bilin(Tensor<T,2> &a, float x, float y) {
+inline T bilin(mdarray<T> &a, float x, float y) {
   int i = (int)floor(x);
   int j = (int)floor(y);
   float l = x - i;
@@ -172,10 +168,10 @@ inline T bilin(Tensor<T,2> &a, float x, float y) {
 }
 
 struct NoNormalizer : INormalizer {
-  void measure(Tensor<float,2> &line) {}
-  void normalize(Tensor<float,2> &out, Tensor<float,2> &in) {
-    assert(in.dimension(1) == target_height);
-    out = in;
+  void measure(mdarray<float> &line) {}
+  void normalize(mdarray<float> &out, mdarray<float> &in) {
+    assert(in.dim(1) == target_height);
+    out.copy(in);
   }
 };
 
@@ -187,11 +183,11 @@ struct MeanNormalizer : INormalizer {
     range = getrenv("norm_range", 1.0);
     if (verbose) print("mean_normalizer", range, vscale);
   }
-  void measure(Tensor<float,2> &line) {
+  void measure(mdarray<float> &line) {
     {
       double sy = 0, s1 = 0;
-      for (int i = 0; i < line.dimension(0); i++) {
-        for (int j = 0; j < line.dimension(1); j++) {
+      for (int i = 0; i < line.dim(0); i++) {
+        for (int j = 0; j < line.dim(1); j++) {
           sy += line(i, j) * j;
           s1 += line(i, j);
         }
@@ -200,8 +196,8 @@ struct MeanNormalizer : INormalizer {
     }
     {
       double sy = 0, s1 = 0;
-      for (int i = 0; i < line.dimension(0); i++) {
-        for (int j = 0; j < line.dimension(1); j++) {
+      for (int i = 0; i < line.dim(0); i++) {
+        for (int j = 0; j < line.dim(1); j++) {
           sy += line(i, j) * fabs(j - y_mean);
           s1 += line(i, j);
         }
@@ -209,11 +205,11 @@ struct MeanNormalizer : INormalizer {
       y_mad = sy / s1;
     }
   }
-  void normalize(Tensor<float,2> &out, Tensor<float,2> &in) {
+  void normalize(mdarray<float> &out, mdarray<float> &in) {
     float actual = vscale * 2 * range * y_mad;
     float scale = actual / target_height;
     cerr << "normalize: " << y_mean << " " << y_mad << " " << actual << endl;
-    int nw = int(in.dimension(0) / scale);
+    int nw = int(in.dim(0) / scale);
     int nh = target_height;
     out.resize(nw, nh);
     for (int i = 0; i < nw; i++) {
@@ -225,12 +221,12 @@ struct MeanNormalizer : INormalizer {
   }
 };
 
-void argmax1(Tensor<float,1> &m, Tensor<float,2> &a) {
-  m.resize(a.dimension(0));
-  for (int i = 0; i < a.dimension(0); i++) {
+void argmax1(mdarray<float> &m, mdarray<float> &a) {
+  m.resize(a.dim(0));
+  for (int i = 0; i < a.dim(0); i++) {
     float mv = a(i, 0);
     float mj = 0;
-    for (int j = 1; j < a.dimension(1); j++) {
+    for (int j = 1; j < a.dim(1); j++) {
       if (a(i, j) < mv) continue;
       mv = a(i, j);
       mj = j;
@@ -239,9 +235,9 @@ void argmax1(Tensor<float,1> &m, Tensor<float,2> &a) {
   }
 }
 
-inline void add_smear(Tensor<float,2> &smooth, Tensor<float,2> &line) {
-  int w = line.dimension(0);
-  int h = line.dimension(1);
+inline void add_smear(mdarray<float> &smooth, mdarray<float> &line) {
+  int w = line.dim(0);
+  int h = line.dim(1);
   for (int j = 0; j < h; j++) {
     double v = 0.0;
     for (int i = 0; i < w; i++) {
@@ -252,24 +248,24 @@ inline void add_smear(Tensor<float,2> &smooth, Tensor<float,2> &line) {
 }
 
 struct CenterNormalizer : INormalizer {
-  pytensor::PyServer *py = 0;
-  Tensor<float,1> center;
+  pymulti::PyServer *py = 0;
+  mdarray<float> center;
   float r = -1;
-  void setPyServer(void *p) { this->py = (pytensor::PyServer *)p; }
+  void setPyServer(void *p) { this->py = (pymulti::PyServer *)p; }
   void getparams(bool verbose) {
     range = getrenv("norm_range", 4.0);
     smooth2d = getrenv("norm_smooth2d", 1.0);
     smooth1d = getrenv("norm_smooth1d", 0.3);
     if (verbose) print("center_normalizer", range, smooth2d, smooth1d);
   }
-  void measure(Tensor<float,2> &line) {
-    Tensor<float,2> smooth, smooth2;
-    int w = line.dimension(0);
-    int h = line.dimension(1);
-    smooth = line;
+  void measure(mdarray<float> &line) {
+    mdarray<float> smooth, smooth2;
+    int w = line.dim(0);
+    int h = line.dim(1);
+    smooth.copy(line);
     gauss2d(smooth, h * smooth2d, h * 0.5);
     add_smear(smooth, line);  // just to avoid singularities
-    Tensor<float,1> a(w);
+    mdarray<float> a(w);
     argmax1(a, smooth);
     gauss1d(center, a, h * smooth1d);
     float s1 = 0.0;
@@ -293,14 +289,14 @@ struct CenterNormalizer : INormalizer {
       py->eval("print ginput(999)");
     }
   }
-  void normalize(Tensor<float,2> &out, Tensor<float,2> &in) {
-    int w = in.dimension(0);
-    if (w != center.dimension(0)) THROW("measure doesn't match normalize");
+  void normalize(mdarray<float> &out, mdarray<float> &in) {
+    int w = in.dim(0);
+    if (w != center.dim(0)) THROW("measure doesn't match normalize");
     float scale = (2.0 * r) / target_height;
     int target_width = max(int(w / scale), 1);
     out.resize(target_width, target_height);
-    for (int i = 0; i < out.dimension(0); i++) {
-      for (int j = 0; j < out.dimension(1); j++) {
+    for (int i = 0; i < out.dim(0); i++) {
+      for (int j = 0; j < out.dim(1); j++) {
         float x = scale * i;
         float y = scale * (j - target_height / 2) + center(int(x));
         out(i, j) = bilin(in, x, y);
@@ -322,12 +318,52 @@ INormalizer *make_Normalizer(const string &name) {
   THROW("unknown normalizer name");
 }
 
+// Setting inputs/outputs using mdarray
+
+inline void assign(Sequence &seq, mdarray<float> &a) {
+  if (a.rank() == 2) {
+    seq.resize(a.dim(0));
+    for (int t = 0; t < seq.size(); t++) {
+      seq[t].resize(a.dim(1), 1);
+      for (int i = 0; i < a.dim(1); i++) seq[t](i, 0) = a(t, i);
+    }
+  } else if (a.rank() == 3) {
+    seq.resize(a.dim(0));
+    for (int t = 0; t < seq.size(); t++) {
+      seq[t].resize(a.dim(1), a.dim(2));
+      for (int i = 0; i < a.dim(1); i++)
+        for (int j = 0; j < a.dim(2); j++) seq[t](i, j) = a(t, i, j);
+    }
+  } else {
+    THROW("bad rank");
+  }
+}
+
+void set_inputs(INetwork *net, mdarray<float> &inputs) {
+  assign(net->inputs, inputs);
+}
+void set_targets(INetwork *net, mdarray<float> &targets) {
+  assign(net->d_outputs, targets);
+  for (int t = 0; t < net->outputs.size(); t++)
+    net->d_outputs[t] -= net->outputs[t];
+}
+void set_targets_accelerated(INetwork *net, mdarray<float> &targets) {
+  THROW("unimplemented");
+}
+void set_classes(INetwork *net, mdarray<int> &targets) {
+  THROW("unimplemented");
+}
+
 // PNG I/O (taken from iulib)
 
 #define __sigsetjmp __sigsetjump0
 #include <png.h>
 #undef __sigsetjmp
 
+typedef mdarray<unsigned char> bytearray;
+typedef mdarray<int> intarray;
+
+#define ERROR(X) THROW(X)
 #define CHECK_CONDITION(X)         \
   do {                             \
     if (!(X)) THROW("CHECK: " #X); \
@@ -339,7 +375,7 @@ INormalizer *make_Normalizer(const string &name) {
 
 bool png_flip = false;
 
-void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
+void read_png(bytearray &image, FILE *fp, bool gray) {
   int d;
   int spp;
   int png_transforms;
@@ -352,28 +388,28 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
   png_infop info_ptr, end_info;
   png_colorp palette;
 
-  if (!fp) THROW("fp not defined");
+  if (!fp) ERROR("fp not defined");
 
   // Allocate the 3 data structures
   if ((png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, (png_voidp)NULL,
                                         NULL, NULL)) == NULL)
-    THROW("png_ptr not made");
+    ERROR("png_ptr not made");
 
   if ((info_ptr = png_create_info_struct(png_ptr)) == NULL) {
     png_destroy_read_struct(&png_ptr, (png_infopp)NULL, (png_infopp)NULL);
-    THROW("info_ptr not made");
+    ERROR("info_ptr not made");
   }
 
   if ((end_info = png_create_info_struct(png_ptr)) == NULL) {
     png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
-    THROW("end_info not made");
+    ERROR("end_info not made");
   }
 
   // Set up png setjmp error handling
 
   if (setjmp(png_jmpbuf(png_ptr))) {
     png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
-    THROW("internal png error");
+    ERROR("internal png error");
   }
 
   png_init_io(png_ptr, fp);
@@ -407,21 +443,21 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
     d = bit_depth;
   } else if (spp == 2) {
     d = 2 * bit_depth;
-    THROW("there shouldn't be 2 spp!");
+    ERROR("there shouldn't be 2 spp!");
   } else if (spp == 3) {
     d = 4 * bit_depth;
   } else { /* spp == 4 */
     d = 4 * bit_depth;
-    THROW("there shouldn't be 4 spp!");
+    ERROR("there shouldn't be 4 spp!");
   }
 
   /* Remove if/when this is implemented for all bit_depths */
   if (spp == 3 && bit_depth != 8) {
     fprintf(stderr, "Help: spp = 3 and depth = %d != 8\n!!", bit_depth);
-    THROW("not implemented for this depth");
+    ERROR("not implemented for this depth");
   }
 
-  Tensor<int,2> color_map;
+  intarray color_map;
 
   if (color_type == PNG_COLOR_TYPE_PALETTE ||
       color_type == PNG_COLOR_MASK_PALETTE) { /* generate a colormap */
@@ -434,7 +470,10 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
     }
   }
 
-  image.resize(w, h, 3);
+  if (gray)
+    image.resize(w, h);
+  else
+    image.resize(w, h, 3);
 
   if (spp == 1) {
     CHECK_CONDITION(color_type != PNG_COLOR_TYPE_PALETTE &&
@@ -451,9 +490,13 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
         } else {
           value = rowptr[j];
         }
-        image(x, y, 0) = value;
-        image(x, y, 1) = value;
-        image(x, y, 2) = value;
+        if (gray) {
+          image(x, y) = value;
+        } else {
+          image(x, y, 0) = value;
+          image(x, y, 1) = value;
+          image(x, y, 2) = value;
+        }
       }
     }
   } else {
@@ -466,9 +509,16 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
       for (int j = 0; j < w; j++) {
         int x = j;
         int y = png_flip ? (h - i - 1) : i;
-        image(x, y, 0) = rowptr[k++];
-        image(x, y, 1) = rowptr[k++];
-        image(x, y, 2) = rowptr[k++];
+        if (gray) {
+          int value = rowptr[k++];
+          value += rowptr[k++];
+          value += rowptr[k++];
+          image(x, y) = value / 3;
+        } else {
+          image(x, y, 0) = rowptr[k++];
+          image(x, y, 1) = rowptr[k++];
+          image(x, y, 2) = rowptr[k++];
+        }
       }
     }
   }
@@ -476,8 +526,8 @@ void read_png(Tensor<unsigned char, 3> &image, FILE *fp) {
   png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
 }
 
-void write_png(FILE *fp, Tensor<unsigned char,3> &image) {
-  int d;
+void write_png(FILE *fp, bytearray &image) {
+  // int d;
   png_byte bit_depth, color_type;
   int w, h;
   png_structp png_ptr;
@@ -486,31 +536,31 @@ void write_png(FILE *fp, Tensor<unsigned char,3> &image) {
   unsigned int default_yres = 300;
 
   int rank = image.rank();
-  CHECK_ARG(image.rank() == 2 || (image.rank() == 3 && image.dimension(2) == 3));
+  CHECK_ARG(image.rank() == 2 || (image.rank() == 3 && image.dim(2) == 3));
 
-  if (!fp) THROW("stream not open");
+  if (!fp) ERROR("stream not open");
 
   /* Allocate the 2 data structures */
   if ((png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, (png_voidp)NULL,
                                          NULL, NULL)) == NULL)
-    THROW("png_ptr not made");
+    ERROR("png_ptr not made");
 
   if ((info_ptr = png_create_info_struct(png_ptr)) == NULL) {
     png_destroy_write_struct(&png_ptr, (png_infopp)NULL);
-    THROW("info_ptr not made");
+    ERROR("info_ptr not made");
   }
 
   /* Set up png setjmp error handling */
   if (setjmp(png_jmpbuf(png_ptr))) {
     png_destroy_write_struct(&png_ptr, &info_ptr);
-    THROW("internal png error");
+    ERROR("internal png error");
   }
 
   png_init_io(png_ptr, fp);
 
-  w = image.dimension(0);
-  h = image.dimension(1);
-  d = image.dimension(2);
+  w = image.dim(0);
+  h = image.dim(1);
+  // d = image.dim(2);
   bit_depth = 8;
   color_type = PNG_COLOR_TYPE_RGB;
 
@@ -521,15 +571,15 @@ void write_png(FILE *fp, Tensor<unsigned char,3> &image) {
                PNG_RESOLUTION_METER);
   png_write_info(png_ptr, info_ptr);
 
-  Tensor<unsigned char,1> rowbuffer;
+  bytearray rowbuffer;
   rowbuffer.resize(3 * w);
   for (int i = 0; i < h; i++) {
     int k = 0;
     for (int j = 0; j < w; j++) {
       int x = j;
       int y = png_flip ? (h - i - 1) : i;
-      if (d==1) {
-        int value = image(x, y, 0);
+      if (rank == 2) {
+        int value = image(x, y);
         rowbuffer(k++) = value;
         rowbuffer(k++) = value;
         rowbuffer(k++) = value;
@@ -549,38 +599,104 @@ void write_png(FILE *fp, Tensor<unsigned char,3> &image) {
   png_destroy_write_struct(&png_ptr, &info_ptr);
 }
 
-inline double clip(double value, double lo, double hi) {
-  return value<lo?lo:value>hi?hi:value;
-}
-
-void read_png(Tensor<float,2> &image, const char *name) {
-  Tensor<unsigned char,3> temp;
+void read_png(bytearray &image, const char *name, bool gray) {
   FILE *stream = fopen(name, "r");
   if (!stream) THROW("error on open");
-  read_png(temp, stream);
+  read_png(image, stream, gray);
   fclose(stream);
-  image.resize(temp.dimension(0), temp.dimension(1));
-  for(int i=0; i<temp.dimension(0); i++) {
-    for(int j=0; j<temp.dimension(1); j++) {
-      if(temp.dimension(2)==1) image(i,j) = temp(i,j,0);
-      else image(i,j) = (temp(i,j,0) +temp(i,j,1) +temp(i,j,2))/(3*255.0);
-    }
-  }
 }
-void write_png(const char *name, Tensor<float,2> &image) {
-  Tensor<unsigned char,3> temp;
-  temp.resize(image.dimension(0), image.dimension(1), 3);
-  for(int i=0; i<temp.dimension(0); i++) {
-    for(int j=0; j<temp.dimension(1); j++) {
-      unsigned char value = floor(clip(image(i,j)*256,0.0,255.999999));
-      temp(i,j,0) = value;
-      temp(i,j,1) = value;
-      temp(i,j,2) = value;
-    }
-  }
+void write_png(const char *name, bytearray &image) {
   FILE *stream = fopen(name, "w");
   if (!stream) THROW("error on open");
-  write_png(stream, temp);
+  write_png(stream, image);
   fclose(stream);
 }
+
+template <class U, class T>
+inline void copy_scale(mdarray<U> &it, mdarray<T> &other, double scale) {
+  it.clear();
+  it.allocate(other.total);
+  for (int i = 0; i < mdarray<T>::MAXRANK + 1; i++) it.dims[i] = other.dims[i];
+  it.fill = other.fill;
+  for (int i = 0; i < it.fill; i++) it.data[i] = other.data[i] * scale;
+}
+
+void read_png(mdarray<float> &image, FILE *fp, bool gray) {
+  mdarray<unsigned char> temp;
+  read_png(temp, fp, gray);
+  copy_scale(image, temp, 1.0 / 255.0);
+}
+
+void write_png(FILE *fp, mdarray<float> &image) {
+  mdarray<unsigned char> temp;
+  copy_scale(temp, image, 255.0);
+  write_png(fp, temp);
+}
+
+void read_png(mdarray<float> &image, const char *name, bool gray) {
+  mdarray<unsigned char> temp;
+  read_png(temp, name, gray);
+  copy_scale(image, temp, 1.0 / 255.0);
+}
+
+void write_png(const char *name, mdarray<float> &image) {
+  mdarray<unsigned char> temp;
+  copy_scale(temp, image, 255.0);
+  write_png(name, temp);
+}
+
+#if 0
+Network make_net_init(const string &kind, int nclasses, int dim, string prefix) {
+    int nhidden = getrenv((prefix+"hidden").c_str(), 100);
+    if (kind == "bidi2") {
+        int nhidden2 = getrenv((prefix+"hidden2").c_str(), -1);
+        net->init(nclasses, nhidden2, nhidden, dim);
+        print("init-bidi2", nclasses, nhidden2, nhidden, dim);
+    } else {
+        net->init(nclasses, nhidden, dim);
+        print("init", nclasses, nhidden, dim);
+    }
+    return net;
+}
+#endif
+
+void glob(vector<string> &result, const string &arg) {
+  result.clear();
+  glob_t buf;
+  glob(arg.c_str(), GLOB_TILDE, nullptr, &buf);
+  for (int i = 0; i < buf.gl_pathc; i++) {
+    result.push_back(buf.gl_pathv[i]);
+  }
+  if (buf.gl_pathc > 0) globfree(&buf);
+}
+
+unsigned long random_state;
+
+void srandomize() {
+  random_state = getienv("seed", 0);
+  if (random_state == 0) {
+    random_state = (unsigned long)fmod(now() * 1e6, 1e9);
+    char **ep = environ;
+    while (*ep) {
+      char *p = *ep++;
+      while (*p) random_state = 17 * random_state + *p++;
+    }
+  }
+  // cerr << "# srandomize " << random_state << endl;
+}
+
+void randstep() {
+  random_state = (random_state * 1664525 + 1013904223) % (1ul << 32);
+}
+
+unsigned urandom() {
+  randstep();
+  return random_state;
+}
+
+int irandom() {
+  randstep();
+  return abs(int(random_state));
+}
+double drandom() { return double(irandom() % 999999733) / 999999733.0; }
 }

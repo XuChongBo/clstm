@@ -6,15 +6,19 @@
 #include <vector>
 #include <memory>
 #include <math.h>
+#include <Eigen/Dense>
 #include <sstream>
 #include <fstream>
 #include <iostream>
 #include <set>
+
+#include "multidim.h"
+#include "pymulti.h"
 #include "extras.h"
-#include "utils.h"
 
 using namespace Eigen;
 using namespace ocropus;
+using namespace pymulti;
 using std::vector;
 using std::map;
 using std::make_pair;
@@ -57,6 +61,13 @@ int main1(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
-  TRY { return main1(argc, argv); }
-  CATCH(const char *message) { cerr << "FATAL: " << message << endl; }
+#ifdef NOEXCEPTION
+  return main1(argc, argv);
+#else
+  try {
+    return main1(argc, argv);
+  } catch (const char *message) {
+    cerr << "FATAL: " << message << endl;
+  }
+#endif
 }

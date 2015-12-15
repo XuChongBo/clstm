@@ -1,0 +1,18 @@
+#!/bin/bash
+set -x
+set -a
+
+find data -name '*.bin.png' | sort -r > data.txt
+sed 1,50d data.txt > train.txt
+sed 50q data.txt > test.txt
+report_every=100
+save_every=0
+ntrain=20000000
+dewarp=center
+display_every=0
+test_every=1000
+hidden=100
+lrate=1e-4
+report_time=0
+# gdb --ex run --args \
+../clstmocrtrain train.txt test.txt

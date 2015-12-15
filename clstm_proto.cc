@@ -2,7 +2,6 @@
 // See clstm.proto for the protocol buffer definitions used here.
 
 #include "clstm.h"
-#include "utils.h"
 #include <assert.h>
 #include <iostream>
 #include <vector>
@@ -11,13 +10,37 @@
 #include <math.h>
 #include <iostream>
 #include <fstream>
+#include <Eigen/Dense>
 #include <stdarg.h>
-#include <typeinfo>
 #ifdef GOOGLE
 #include "third_party/clstm/clstm.pb.h"
 #else
 #include "clstm.pb.h"
 #endif
+
+namespace {
+inline void throwf(const char *format, ...) {
+  static char buf[1024];
+  va_list arglist;
+  va_start(arglist, format);
+  vsprintf(buf, format, arglist);
+  va_end(arglist);
+  THROW(buf);
+}
+
+inline void print() { std::cout << std::endl; }
+
+template <class T>
+inline void print(const T &arg) {
+  std::cout << arg << std::endl;
+}
+
+template <class T, typename... Args>
+inline void print(T arg, Args... args) {
+  std::cout << arg << " ";
+  print(args...);
+}
+}
 
 namespace ocropus {
 using std::cout;
@@ -32,36 +55,51 @@ using std::to_string;
 bool proto_verbose =
     getenv("clstm_proto_verbose") && atoi(getenv("clstm_proto_verbose"));
 
-void proto_of_params(clstm::Array *array, Params &params, bool weights = true) {
-  Ten2 a = params.V();
-  array->add_dim(rows(a));
-  array->add_dim(cols(a));
+void proto_of_Mat(clstm::Array *array, Mat &a, bool weights = true) {
+  array->add_dim(a.rows());
+  array->add_dim(a.cols());
   if (!weights) return;
-  for (int i = 0; i < rows(a); i++)
-    for (int j = 0; j < cols(a); j++) array->add_value(a(i, j));
+  for (int i = 0; i < a.rows(); i++)
+    for (int j = 0; j < a.cols(); j++) array->add_value(a(i, j));
 }
 
-void params_of_proto(Params &params, const clstm::Array *array) {
+void proto_of_Vec(clstm::Array *array, Vec &a, bool weights = true) {
+  array->add_dim(a.size());
+  if (!weights) return;
+  for (int i = 0; i < a.size(); i++) array->add_value(a(i));
+}
+
+void Mat_of_proto(Mat &a, const clstm::Array *array) {
   if (array->dim_size() != 2)
     throwf("bad format (Mat, %s, %d)", array->name().c_str(),
            array->dim_size());
-  params.setZero(array->dim(0), array->dim(1));
-  Ten2 a = params.V();
+  a.resize(array->dim(0), array->dim(1));
+  a.setZero();
   if (array->value_size() > 0) {
     if (array->value_size() != a.size()) THROW("bad size (Mat)");
     int k = 0;
-    for (int i = 0; i < rows(a); i++)
-      for (int j = 0; j < cols(a); j++) a(i, j) = array->value(k++);
+    for (int i = 0; i < a.rows(); i++)
+      for (int j = 0; j < a.cols(); j++) a(i, j) = array->value(k++);
+  }
+}
+
+void Vec_of_proto(Vec &a, const clstm::Array *array) {
+  if (array->dim_size() != 1) THROW("bad format (Vec)");
+  a.resize(array->dim(0));
+  a.setZero();
+  if (array->value_size() > 0) {
+    if (array->value_size() != a.size()) THROW("bad size (Vec)");
+    int k = 0;
+    for (int i = 0; i < a.size(); i++) a(i) = array->value(k++);
   }
 }
 
 void proto_of_net(clstm::NetworkProto *proto, INetwork *net,
                   bool weights = true) {
-  if (net->kind == "") {
-    cerr << typeid(*net).name() << endl;
-    assert(net->kind != "");
-  }
-  proto->set_kind(net->kind);
+  net->preSave();
+  assert(string("") != net->kind());
+  proto->set_kind(net->kind());
+  proto->set_name(net->name);
   proto->set_ninput(net->ninput());
   proto->set_noutput(net->noutput());
   assert(proto->kind() != "");
@@ -70,10 +108,9 @@ void proto_of_net(clstm::NetworkProto *proto, INetwork *net,
   assert(proto->noutput() >= 0);
   assert(proto->noutput() < 1000000);
   for (int i = 0; i < net->icodec.size(); i++)
-    proto->add_icodec(net->icodec.codec[i]);
-  for (int i = 0; i < net->codec.size(); i++)
-    proto->add_codec(net->codec.codec[i]);
-  for (auto kv : net->attr) {
+    proto->add_icodec(net->icodec[i]);
+  for (int i = 0; i < net->codec.size(); i++) proto->add_codec(net->codec[i]);
+  for (auto kv : net->attributes) {
     if (kv.first == "name") continue;
     if (kv.first == "ninput") continue;
     if (kv.first == "noutput") continue;
@@ -81,13 +118,17 @@ void proto_of_net(clstm::NetworkProto *proto, INetwork *net,
     kvp->set_key(kv.first);
     kvp->set_value(kv.second);
   }
-  for (auto it : net->parameters) {
-    Params *a = it.second;
-    string name = it.first;
-    clstm::Array *array = proto->add_weights();
-    array->set_name(name);
-    proto_of_params(array, *a, weights);
-  }
+  net->myweights("",
+                 [proto, weights](const string &prefix, VecMat a, VecMat da) {
+                   clstm::Array *array = proto->add_weights();
+                   array->set_name(prefix);
+                   if (a.mat)
+                     proto_of_Mat(array, *a.mat, weights);
+                   else if (a.vec)
+                     proto_of_Vec(array, *a.vec, weights);
+                   else
+                     THROW("oops (save type)");
+                 });
   for (int i = 0; i < net->sub.size(); i++) {
     clstm::NetworkProto *subproto = proto->add_sub();
     proto_of_net(subproto, net->sub[i].get(), weights);
@@ -102,28 +143,28 @@ Network net_of_proto(const clstm::NetworkProto *proto) {
   assert(proto->noutput() >= 0);
   assert(proto->noutput() < 1000000);
   net = make_layer(proto->kind());
-  net->attr.set("ninput", proto->ninput());
-  net->attr.set("noutput", proto->noutput());
+  net->name = proto->name();
+  net->attributes["ninput"] = to_string(proto->ninput());
+  net->attributes["noutput"] = to_string(proto->noutput());
   for (int i = 0; i < proto->attribute_size(); i++) {
     const clstm::KeyValue *attr = &proto->attribute(i);
-    net->attr.set(attr->key(), attr->value());
+    net->attributes[attr->key()] = attr->value();
   }
-  vector<int> icodec;
   for (int i = 0; i < proto->icodec_size(); i++)
-    icodec.push_back(proto->icodec(i));
-  net->icodec.set(icodec);
-  vector<int> codec;
+    net->icodec.push_back(proto->icodec(i));
   for (int i = 0; i < proto->codec_size(); i++)
-    codec.push_back(proto->codec(i));
-  net->codec.set(codec);
-  map<string, Params *> weights;
-  for (auto it : net->parameters) {
-    weights[it.first] = it.second;
-  }
+    net->codec.push_back(proto->codec(i));
+  map<string, VecMat> weights;
+  net->myweights("", [&weights](const string &prefix, VecMat a, VecMat da) {
+    weights[prefix] = a;
+  });
   for (int i = 0; i < proto->weights_size(); i++) {
     string key = proto->weights(i).name();
-    Params *a = weights[key];
-    params_of_proto(*a, &proto->weights(i));
+    VecMat a = weights[key];
+    if (a.mat)
+      Mat_of_proto(*a.mat, &proto->weights(i));
+    else if (a.vec)
+      Vec_of_proto(*a.vec, &proto->weights(i));
   }
   for (int i = 0; i < proto->sub_size(); i++) {
     net->add(net_of_proto(&proto->sub(i)));
@@ -164,7 +205,6 @@ void save_as_proto(const string &fname, INetwork *net) {
 Network load_as_proto(const string &fname) {
   ifstream stream;
   stream.open(fname, ios::binary);
-  if (!stream) throwf("cannot open: %s", fname.c_str());
   unique_ptr<clstm::NetworkProto> proto;
   proto.reset(new clstm::NetworkProto());
   if (proto->ParseFromIstream(&stream) == false) {
